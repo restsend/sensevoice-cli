@@ -1,0 +1,549 @@
+use anyhow::{Context, Result};
+use clap::{ArgAction, Parser};
+use hf_hub::api::sync::{Api, ApiBuilder};
+use hf_hub::{Repo, RepoType};
+use ndarray::Axis;
+use serde::Serialize;
+use std::{
+    env, fs, io,
+    path::{Path, PathBuf},
+    time::Instant,
+};
+use tracing::{debug, error, warn, Level};
+use tracing_subscriber::filter::LevelFilter;
+
+mod audio;
+mod frontend;
+mod onnx;
+mod tokenizer;
+mod vad;
+
+use crate::audio::{decode_audio_multi, resample_channels};
+use crate::frontend::{FeaturePipeline, FrontendConfig};
+
+use crate::onnx::OrtEncoder;
+use crate::tokenizer::TokenDecoder;
+use crate::vad::SileroVad;
+
+fn language_id_from_code(code: &str) -> i32 {
+    // Python mapping: {"auto":0,"zh":3,"en":4,"yue":7,"ja":11,"ko":12,"nospeech":13}
+    match code.to_lowercase().as_str() {
+        "auto" => 0,
+        "zh" => 3,
+        "en" => 4,
+        "yue" => 7,
+        "ja" => 11,
+        "ko" => 12,
+        "nospeech" => 13,
+        _ => 0,
+    }
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "sensevoice",
+    author,
+    version,
+    about = "SenseVoice Rust CLI (ORT + Symphonia + HF Hub)"
+)]
+struct Cli {
+    /// Download/cache directory for models and resources
+    #[arg(short = 'd', long = "download_path", default_value = "resource")]
+    download_path: PathBuf,
+
+    /// Device id for CUDA; -1 for CPU
+    #[arg(long = "device", default_value_t = -1)]
+    device: i32,
+
+    /// Intra-op threads for ONNX Runtime
+    #[arg(long = "num_threads", default_value_t = 4)]
+    num_threads: usize,
+
+    /// Language code: auto, zh, en, yue, ja, ko, nospeech
+    #[arg(long = "language", default_value = "auto")]
+    language: String,
+
+    /// Use ITN post-processing
+    #[arg(long = "use_itn", action = ArgAction::SetTrue)]
+    use_itn: bool,
+
+    /// Use int8 Silero VAD model
+    #[arg(long = "vad-int8", action = ArgAction::SetTrue)]
+    vad_int8: bool,
+
+    /// Optional HF endpoint/mirror (overrides env HF_ENDPOINT/HF_MIRROR)
+    #[arg(long = "hf-endpoint")]
+    hf_endpoint: Option<String>,
+
+    /// Log level
+    #[arg(long = "log")]
+    log: Option<String>,
+
+    /// Output JSON file path
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
+
+    /// Input audio file (wav/mp3/ogg/flac)
+    #[arg(value_name = "AUDIO")]
+    audio: PathBuf,
+}
+
+#[derive(Serialize)]
+struct ChannelResult {
+    channel: usize,
+    duration_sec: f32,
+    rtf: f32,
+    segments: Vec<Segment>,
+}
+
+#[derive(Serialize)]
+struct Segment {
+    start_sec: f32,
+    end_sec: f32,
+    text: String,
+    tags: Vec<String>,
+}
+
+fn extract_tags(text: &str) -> (String, Vec<String>) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut tags = Vec::new();
+    let mut clean = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '<' {
+            let mut j = i + 1;
+            let mut closed = false;
+            while j < chars.len() {
+                if chars[j] == '>' {
+                    closed = true;
+                    break;
+                }
+                j += 1;
+            }
+            if closed {
+                let tag_content: String = chars[i + 1..j].iter().collect();
+                let tag = tag_content.trim();
+                if !tag.is_empty() {
+                    tags.push(tag.to_string());
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        clean.push(chars[i]);
+        i += 1;
+    }
+    let cleaned = clean.trim().to_string();
+    (cleaned, tags)
+}
+
+fn build_api(hf_endpoint_cli: &Option<String>) -> Result<Api> {
+    if let Some(ep) = hf_endpoint_cli
+        .clone()
+        .or_else(|| env::var("HF_ENDPOINT").ok())
+        .or_else(|| env::var("HF_MIRROR").ok())
+    {
+        // Fallback approach: set env for hf-hub to pick up endpoint
+        env::set_var("HF_ENDPOINT", ep);
+    }
+    let api = ApiBuilder::from_env().build()?;
+    Ok(api)
+}
+
+fn ensure_models(api: &Api, download_path: &PathBuf) -> Result<PathBuf> {
+    fs::create_dir_all(download_path).context("create download directory")?;
+    let asr_repo = Repo::with_revision(
+        "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09".to_string(),
+        RepoType::Model,
+        "main".to_string(),
+    );
+    let asr_repo = api.repo(asr_repo);
+    let asr_files = ["model.int8.onnx", "tokens.txt"];
+
+    for f in asr_files.iter() {
+        let dest = download_path.join(f);
+        if dest.exists() {
+            continue;
+        }
+        match asr_repo.get(f) {
+            Ok(src_path) => {
+                if let Err(e) = copy_into_dir(&src_path, &dest) {
+                    warn!(file = %f, error = %e, "failed to copy cached ASR file, retrying via direct download");
+                    let url = asr_repo.url(f);
+                    if let Err(dl_err) = download_without_range(&url, &dest) {
+                        error!(file = %f, error = %dl_err, "failed to fetch ASR file from mirror");
+                    }
+                }
+            }
+            Err(err) => {
+                warn!(file = %f, error = ?err, "hf-hub get failed for ASR file, retrying via direct download");
+                let url = asr_repo.url(f);
+                if let Err(dl_err) = download_without_range(&url, &dest) {
+                    error!(file = %f, error = %dl_err, "failed to fetch ASR file from mirror");
+                }
+            }
+        }
+    }
+
+    let am_path = download_path.join("am.mvn");
+    if !am_path.exists() {
+        let aux_repo = Repo::with_revision(
+            "lovemefan/SenseVoice-onnx".to_string(),
+            RepoType::Model,
+            "main".to_string(),
+        );
+        let aux_repo = api.repo(aux_repo);
+        let f = "am.mvn";
+        match aux_repo.get(f) {
+            Ok(src_path) => {
+                if let Err(e) = copy_into_dir(&src_path, &am_path) {
+                    warn!(file = %f, error = %e, "failed to copy cached CMVN file, retrying via direct download");
+                    let url = aux_repo.url(f);
+                    if let Err(dl_err) = download_without_range(&url, &am_path) {
+                        error!(file = %f, error = %dl_err, "failed to fetch CMVN file from mirror");
+                    }
+                }
+            }
+            Err(err) => {
+                warn!(file = %f, error = ?err, "hf-hub get failed for CMVN file, retrying via direct download");
+                let url = aux_repo.url(f);
+                if let Err(dl_err) = download_without_range(&url, &am_path) {
+                    error!(file = %f, error = %dl_err, "failed to fetch CMVN file from mirror");
+                }
+            }
+        }
+    }
+
+    Ok(download_path.clone())
+}
+
+fn copy_into_dir(src: &Path, dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("ensure parent directory {}", parent.display()))?;
+    }
+    if src == dest {
+        return Ok(());
+    }
+    fs::copy(src, dest).with_context(|| format!("copy {} to {}", src.display(), dest.display()))?;
+    Ok(())
+}
+
+fn download_without_range(url: &str, dest: &Path) -> Result<PathBuf> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("ensure parent directory {}", parent.display()))?;
+    }
+
+    let temp_path = dest.with_extension("download");
+    let agent = ureq::AgentBuilder::new().try_proxy_from_env(true).build();
+    let response = agent
+        .get(url)
+        .call()
+        .map_err(|e| anyhow::anyhow!("request failed: {e}"))?;
+
+    if !(200..=299).contains(&response.status()) {
+        return Err(anyhow::anyhow!(
+            "unexpected status {} while downloading {}",
+            response.status(),
+            url
+        ));
+    }
+
+    let mut reader = response.into_reader();
+    let mut file = fs::File::create(&temp_path)
+        .with_context(|| format!("create temporary file {}", temp_path.display()))?;
+    io::copy(&mut reader, &mut file)
+        .with_context(|| format!("write bytes for {}", dest.display()))?;
+    file.sync_all()
+        .with_context(|| format!("flush file {}", temp_path.display()))?;
+
+    if dest.exists() {
+        fs::remove_file(dest)
+            .with_context(|| format!("remove existing file {}", dest.display()))?;
+    }
+    fs::rename(&temp_path, dest)
+        .with_context(|| format!("finalize download to {}", dest.display()))?;
+
+    Ok(dest.to_path_buf())
+}
+
+fn ensure_vad_model(api: &Api, download_path: &PathBuf, use_int8: bool) -> Result<PathBuf> {
+    let vad_dir = download_path.join("silero-vad");
+    fs::create_dir_all(&vad_dir).context("create silero-vad directory")?;
+
+    let repo = Repo::with_revision(
+        "onnx-community/silero-vad".to_string(),
+        RepoType::Model,
+        "main".to_string(),
+    );
+    let repo = api.repo(repo);
+    let files = ["onnx/model.onnx", "onnx/model_int8.onnx"];
+
+    for f in files.iter() {
+        let dest = vad_dir.join(f);
+        if dest.exists() {
+            continue;
+        }
+        match repo.get(f) {
+            Ok(src_path) => {
+                if let Err(e) = copy_into_dir(&src_path, &dest) {
+                    warn!(file = %f, error = %e, "failed to copy cached Silero VAD file, retrying via direct download");
+                    let url = repo.url(f);
+                    if let Err(dl_err) = download_without_range(&url, &dest) {
+                        error!(file = %f, error = %dl_err, "failed to fetch Silero VAD file from HF mirror");
+                    }
+                }
+            }
+            Err(err) => {
+                warn!(file = %f, error = ?err, "hf-hub get failed for Silero VAD, retrying via direct download");
+                let url = repo.url(f);
+                if let Err(dl_err) = download_without_range(&url, &dest) {
+                    error!(file = %f, error = %dl_err, "failed to fetch Silero VAD file from HF mirror");
+                }
+            }
+        }
+    }
+
+    let selected = if use_int8 {
+        vad_dir.join("onnx/model_int8.onnx")
+    } else {
+        vad_dir.join("onnx/model.onnx")
+    };
+    if !selected.exists() {
+        anyhow::bail!(
+            "Silero VAD model {:?} missing after download attempt",
+            selected
+        );
+    }
+    Ok(selected)
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    tracing_subscriber::fmt()
+        .with_max_level(LevelFilter::from_level(
+            cli.log
+                .as_ref()
+                .map(|l| l.parse().ok())
+                .flatten()
+                .unwrap_or(Level::WARN),
+        ))
+        .with_target(false)
+        .init();
+
+    // 1) HF Hub models
+    let api = build_api(&cli.hf_endpoint)?;
+    debug!(
+        endpoint = cli.hf_endpoint,
+        "checking/downloading models from HF Hub (mirror-aware)"
+    );
+    let snapshot_dir = ensure_models(&api, &cli.download_path)?;
+    let vad_model_path = ensure_vad_model(&api, &cli.download_path, cli.vad_int8)?;
+
+    let encoder_path = snapshot_dir.join("model.int8.onnx");
+    let tokens_path = snapshot_dir.join("tokens.txt");
+
+    if !encoder_path.exists() || !tokens_path.exists() {
+        error!("model/resource files missing in snapshot. Please check repository contents.");
+    }
+
+    let fe_cfg = FrontendConfig::default();
+    let target_sample_rate = fe_cfg.sample_rate as u32;
+    let mut vad = match SileroVad::new(&vad_model_path, fe_cfg.sample_rate, cli.num_threads) {
+        Ok(v) => {
+            debug!(
+                use_int8 = cli.vad_int8,
+                vad_model = %vad_model_path.display(),
+                "Silero VAD model initialized"
+            );
+            v
+        }
+        Err(err) => {
+            if cli.vad_int8 {
+                warn!(
+                    error = %err,
+                    vad_model = %vad_model_path.display(),
+                    "failed to initialize int8 Silero VAD, retrying with float32 model"
+                );
+                let fallback_path = ensure_vad_model(&api, &cli.download_path, false)?;
+                let fallback_vad =
+                    SileroVad::new(&fallback_path, fe_cfg.sample_rate, cli.num_threads)
+                        .with_context(|| {
+                            format!("load Silero VAD fallback from {}", fallback_path.display())
+                        })?;
+                debug!(
+                    use_int8 = false,
+                    vad_model = %fallback_path.display(),
+                    "Silero VAD model initialized after fallback"
+                );
+                fallback_vad
+            } else {
+                return Err(err);
+            }
+        }
+    };
+
+    // 4) ORT Session for encoder + tokenizer
+    let mut encoder = OrtEncoder::new(&encoder_path, cli.device, cli.num_threads)?;
+    let decoder = TokenDecoder::new(&tokens_path)?;
+    let lang_id = language_id_from_code(&cli.language);
+
+    // 2) Audio decode (multi-channel)
+    let t0 = Instant::now();
+    let (decoded_sample_rate, channels, mut samples_per_channel) = decode_audio_multi(&cli.audio)?;
+    let durations: Vec<f32> = samples_per_channel
+        .iter()
+        .map(|ch| ch.len() as f32 / decoded_sample_rate as f32)
+        .collect();
+    let audio_duration_sec = durations.first().copied().unwrap_or(0.0);
+    if decoded_sample_rate != target_sample_rate {
+        debug!(
+            "resampling audio from {} Hz to {} Hz",
+            decoded_sample_rate, target_sample_rate
+        );
+        samples_per_channel =
+            resample_channels(samples_per_channel, decoded_sample_rate, target_sample_rate)?;
+    }
+    debug!(
+        "decoded audio: {} Hz, {} ch, duration ~{:.2}s",
+        decoded_sample_rate, channels, audio_duration_sec
+    );
+
+    // 3) Frontend: fbank + LFR + CMVN (Kaldi-like defaults)
+    let mut fe = FeaturePipeline::new(fe_cfg);
+
+    let mut results: Vec<ChannelResult> = Vec::new();
+
+    for (ch_idx, ch) in samples_per_channel.iter().enumerate() {
+        let mut detected_segments = vad.collect_segments(ch)?;
+        if detected_segments.is_empty() {
+            warn!(
+                channel = ch_idx,
+                "no speech detected by VAD, falling back to full channel"
+            );
+            detected_segments.push(crate::vad::VadSegment {
+                start: 0,
+                end: ch.len(),
+            });
+        }
+
+        let mut channel_segments: Vec<Segment> = Vec::new();
+
+        for seg in detected_segments {
+            let start = seg.start.min(ch.len());
+            let end = seg.end.min(ch.len());
+            if end <= start {
+                continue;
+            }
+            let segment_samples: Vec<f32> = ch[start..end].to_vec();
+            if segment_samples.is_empty() {
+                continue;
+            }
+
+            let feats = match fe.compute_features(&segment_samples, target_sample_rate) {
+                Ok(f) => f,
+                Err(e) => {
+                    warn!(channel = ch_idx, start = start, end = end, error = %e, "feature extraction failed for segment");
+                    continue;
+                }
+            };
+            if feats.is_empty() {
+                warn!(
+                    channel = ch_idx,
+                    start = start,
+                    end = end,
+                    "empty feature matrix for segment, skipping"
+                );
+                continue;
+            }
+            let feats = feats.insert_axis(Axis(0));
+            let (frames, dims) = (feats.len_of(Axis(1)), feats.len_of(Axis(2)));
+            let elem = (frames * dims).max(1) as f32;
+            let sum: f32 = feats.iter().copied().sum();
+            let mean = sum / elem;
+            let var = feats
+                .iter()
+                .map(|v| {
+                    let diff = *v - mean;
+                    diff * diff
+                })
+                .sum::<f32>()
+                / elem;
+            let std = var.sqrt();
+            debug!(
+                channel = ch_idx,
+                start = start,
+                end = end,
+                frames,
+                dims,
+                mean = format!("{:.3}", mean),
+                std = format!("{:.3}", std),
+                "segment features computed"
+            );
+
+            let raw_text = encoder.run_and_decode(&decoder, feats.view(), lang_id, cli.use_itn)?;
+            let (clean_text, tags) = extract_tags(&raw_text);
+            channel_segments.push(Segment {
+                start_sec: start as f32 / target_sample_rate as f32,
+                end_sec: end as f32 / target_sample_rate as f32,
+                text: clean_text,
+                tags,
+            });
+        }
+
+        if channel_segments.is_empty() {
+            warn!(
+                channel = ch_idx,
+                "no valid segments produced after VAD, falling back to full channel transcription"
+            );
+            let feats = fe.compute_features(ch, target_sample_rate)?;
+            if !feats.is_empty() {
+                let feats = feats.insert_axis(Axis(0));
+                let raw_text =
+                    encoder.run_and_decode(&decoder, feats.view(), lang_id, cli.use_itn)?;
+                let (clean_text, tags) = extract_tags(&raw_text);
+                channel_segments.push(Segment {
+                    start_sec: 0.0,
+                    end_sec: ch.len() as f32 / target_sample_rate as f32,
+                    text: clean_text,
+                    tags,
+                });
+            }
+        }
+
+        results.push(ChannelResult {
+            channel: ch_idx,
+            duration_sec: durations
+                .get(ch_idx)
+                .copied()
+                .unwrap_or_else(|| ch.len() as f32 / target_sample_rate as f32),
+            rtf: 0.0,
+            segments: channel_segments,
+        });
+    }
+
+    let elapsed = t0.elapsed();
+    let rtf = (elapsed.as_secs_f32()) / (channels as f32 * audio_duration_sec.max(1e-6));
+    for result in &mut results {
+        result.rtf = rtf;
+    }
+
+    let json = serde_json::to_string_pretty(&results)?;
+    if let Some(output_path) = &cli.output {
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create output directory {}", parent.display()))?;
+        }
+        fs::write(output_path, json.as_bytes())
+            .with_context(|| format!("write JSON output to {}", output_path.display()))?;
+        debug!(
+            path = %output_path.display(),
+            "transcription JSON written to file"
+        );
+    } else {
+        println!("{}", json);
+    }
+    debug!("time: {:?}, rtf: {:.3}", elapsed, rtf);
+    Ok(())
+}
