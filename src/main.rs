@@ -54,7 +54,7 @@ fn user_home_dir() -> Option<PathBuf> {
     }
 }
 
-fn default_download_dir() -> PathBuf {
+fn default_models_dir() -> PathBuf {
     user_home_dir()
         .map(|mut home| {
             home.push(".sensevoice-models");
@@ -84,19 +84,19 @@ fn resolve_download_path(path: &Path) -> PathBuf {
 )]
 struct Cli {
     /// Download/cache directory for models and resources
-    #[arg(short = 'd', long = "download_path", default_value_os_t = default_download_dir())]
-    download_path: PathBuf,
+    #[arg(long = "models_path", default_value_os_t = default_models_dir())]
+    models_path: PathBuf,
 
     /// Device id for CUDA; -1 for CPU
     #[arg(long = "device", default_value_t = -1)]
     device: i32,
 
     /// Intra-op threads for ONNX Runtime
-    #[arg(long = "num_threads", default_value_t = 4)]
+    #[arg(short = 't', long = "num_threads", default_value_t = 4)]
     num_threads: usize,
 
     /// Language code: auto, zh, en, yue, ja, ko, nospeech
-    #[arg(long = "language", default_value = "auto")]
+    #[arg(short = 'l', long = "language", default_value = "auto")]
     language: String,
 
     /// Use ITN post-processing
@@ -118,6 +118,10 @@ struct Cli {
     /// Output JSON file path
     #[arg(short = 'o', long = "output")]
     output: Option<PathBuf>,
+
+    /// Maximum number of audio channels to transcribe (0 = all)
+    #[arg(short = 'c', long = "channels", default_value_t = 1)]
+    channels: usize,
 
     /// Input audio file (wav/mp3/ogg/flac)
     #[arg(value_name = "AUDIO")]
@@ -329,7 +333,7 @@ fn ensure_vad_model(api: &Api, download_path: &PathBuf, use_int8: bool) -> Resul
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let download_path = resolve_download_path(&cli.download_path);
+    let download_path = resolve_download_path(&cli.models_path);
     tracing_subscriber::fmt()
         .with_max_level(LevelFilter::from_level(
             cli.log
@@ -400,7 +404,20 @@ fn main() -> Result<()> {
 
     // 2) Audio decode (multi-channel)
     let t0 = Instant::now();
-    let (decoded_sample_rate, channels, mut samples_per_channel) = decode_audio_multi(&cli.audio)?;
+    let (decoded_sample_rate, total_channels, mut samples_per_channel) =
+        decode_audio_multi(&cli.audio)?;
+    let requested_channels = if cli.channels == 0 {
+        samples_per_channel.len()
+    } else {
+        cli.channels.min(samples_per_channel.len())
+    };
+    if samples_per_channel.len() > requested_channels {
+        samples_per_channel.truncate(requested_channels);
+    }
+    if samples_per_channel.is_empty() {
+        anyhow::bail!("no audio channels available for transcription");
+    }
+    let processed_channels = samples_per_channel.len();
     let durations: Vec<f32> = samples_per_channel
         .iter()
         .map(|ch| ch.len() as f32 / decoded_sample_rate as f32)
@@ -415,8 +432,8 @@ fn main() -> Result<()> {
             resample_channels(samples_per_channel, decoded_sample_rate, target_sample_rate)?;
     }
     debug!(
-        "decoded audio: {} Hz, {} ch, duration ~{:.2}s",
-        decoded_sample_rate, channels, audio_duration_sec
+        "decoded audio: {} Hz, {} ch (processing {}), duration ~{:.2}s",
+        decoded_sample_rate, total_channels, processed_channels, audio_duration_sec
     );
 
     // 3) Frontend: fbank + LFR + CMVN (Kaldi-like defaults)
@@ -533,7 +550,8 @@ fn main() -> Result<()> {
     }
 
     let elapsed = t0.elapsed();
-    let rtf = (elapsed.as_secs_f32()) / (channels as f32 * audio_duration_sec.max(1e-6));
+    let denom_channels = processed_channels.max(1);
+    let rtf = elapsed.as_secs_f32() / (denom_channels as f32 * audio_duration_sec.max(1e-6));
     for result in &mut results {
         result.rtf = rtf;
     }

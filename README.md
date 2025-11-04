@@ -10,7 +10,7 @@ cargo install sensevoice-cli
 ## Basic Usage
 
 ```
-sensevoice-cli path/to/audio.wav 
+sensevoice-cli path/to/audio.wav
 sensevoice-cli -o transcript.json path/to/audio.wav
 ```
 
@@ -41,21 +41,22 @@ Outout:
 
 - Input formats: WAV, MP3, OGG, and FLAC.
 - Default output: JSON written to stdout with per-channel segments.
-- Models download into `resource/` on first run (override with `--download_path`).
+- Models download into `~/.sensevoice-models` on first run (override with `-d/--models_path`).
 
 ### Handy Flags
 
 ```
-sensevoice-cli --language zh --use_itn samples/demo.wav
+sensevoice-cli -l zh -i -c 2 samples/demo.wav
 ```
 
-- `--language`: explicit language hint (`auto`, `zh`, `en`, `yue`, `ja`, `ko`, `nospeech`).
+- `-l/--language`: explicit language hint (`auto`, `zh`, `en`, `yue`, `ja`, `ko`, `nospeech`).
 - `--use_itn`: enable inverse text normalization for cleaner numbers and dates.
-- `--output`: write JSON to a file instead of stdout.
+- `-c/--channels`: limit the number of channels to transcribe (default 1, set 0 for all).
+- `-o/--output`: write JSON to a file instead of stdout.
 
 ## Advanced Tips
 
 - Mirror friendly downloads: add `--hf-endpoint https://hf-mirror.com` (or set `HF_ENDPOINT/HF_MIRROR`) to speed up model fetches from mainland China.
 - Multi-channel aware: every audio channel is decoded separately; VAD segments are merged into a single JSON array with channel metadata.
 - VAD precision: append `--vad-int8` to prefer the quantized Silero VAD model when CPU resources are limited.
-- Performance tuning: adjust `--num_threads` to match available CPU cores; set `--device` to a CUDA ID (`0`, `1`, ...) for GPU inference when ONNX Runtime is built with CUDA.
+- Performance tuning: adjust `-t/--num_threads` to match available CPU cores; set `--device` to a CUDA ID (`0`, `1`, ...) for GPU inference when ONNX Runtime is built with CUDA.

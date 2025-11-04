@@ -2,7 +2,7 @@
 license = "MIT"
 categories = ["command-line-utilities"]
 name = "sensevoice-cli"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["jinti <shenjindi@fourz.cn>"]
 edition = "2021"
 keywords = ["sensevoice", "developer", "asr", "cli", "onnx"]
