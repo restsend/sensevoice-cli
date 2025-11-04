@@ -201,6 +201,7 @@ fn ensure_models(api: &Api, download_path: &PathBuf) -> Result<PathBuf> {
         if dest.exists() {
             continue;
         }
+        warn!(file = %f, "ASR model/resource file missing, downloading...");
         match asr_repo.get(f) {
             Ok(src_path) => {
                 if let Err(e) = copy_into_dir(&src_path, &dest) {
@@ -220,36 +221,6 @@ fn ensure_models(api: &Api, download_path: &PathBuf) -> Result<PathBuf> {
             }
         }
     }
-
-    let am_path = download_path.join("am.mvn");
-    if !am_path.exists() {
-        let aux_repo = Repo::with_revision(
-            "lovemefan/SenseVoice-onnx".to_string(),
-            RepoType::Model,
-            "main".to_string(),
-        );
-        let aux_repo = api.repo(aux_repo);
-        let f = "am.mvn";
-        match aux_repo.get(f) {
-            Ok(src_path) => {
-                if let Err(e) = copy_into_dir(&src_path, &am_path) {
-                    warn!(file = %f, error = %e, "failed to copy cached CMVN file, retrying via direct download");
-                    let url = aux_repo.url(f);
-                    if let Err(dl_err) = download_without_range(&url, &am_path) {
-                        error!(file = %f, error = %dl_err, "failed to fetch CMVN file from mirror");
-                    }
-                }
-            }
-            Err(err) => {
-                warn!(file = %f, error = ?err, "hf-hub get failed for CMVN file, retrying via direct download");
-                let url = aux_repo.url(f);
-                if let Err(dl_err) = download_without_range(&url, &am_path) {
-                    error!(file = %f, error = %dl_err, "failed to fetch CMVN file from mirror");
-                }
-            }
-        }
-    }
-
     Ok(download_path.clone())
 }
 
@@ -321,6 +292,7 @@ fn ensure_vad_model(api: &Api, download_path: &PathBuf, use_int8: bool) -> Resul
         if dest.exists() {
             continue;
         }
+        warn!(file = %f, "Silero VAD model file missing, downloading...");
         match repo.get(f) {
             Ok(src_path) => {
                 if let Err(e) = copy_into_dir(&src_path, &dest) {
