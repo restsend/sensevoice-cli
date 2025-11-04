@@ -3,10 +3,10 @@
 A lightweight command-line front end for the SenseVoice multilingual speech recognition model.
 
 ## Installation
-
 ```
 cargo install sensevoice-cli
 ```
+
 ## Basic Usage
 
 ```

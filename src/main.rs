@@ -39,6 +39,42 @@ fn language_id_from_code(code: &str) -> i32 {
     }
 }
 
+fn user_home_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .or_else(|| {
+                let drive = env::var("HOMEDRIVE").ok()?;
+                let path = env::var("HOMEPATH").ok()?;
+                Some(PathBuf::from(format!("{drive}{path}")))
+            })
+            .or_else(|| env::var_os("HOME").map(PathBuf::from))
+    } else {
+        env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+fn default_download_dir() -> PathBuf {
+    user_home_dir()
+        .map(|mut home| {
+            home.push(".sensevoice-models");
+            home
+        })
+        .unwrap_or_else(|| PathBuf::from(".sensevoice-models"))
+}
+
+fn resolve_download_path(path: &Path) -> PathBuf {
+    if let Ok(stripped) = path.strip_prefix("~") {
+        if let Some(home) = user_home_dir() {
+            if stripped.as_os_str().is_empty() {
+                return home;
+            }
+            return home.join(stripped);
+        }
+    }
+    path.to_path_buf()
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "sensevoice",
@@ -48,7 +84,7 @@ fn language_id_from_code(code: &str) -> i32 {
 )]
 struct Cli {
     /// Download/cache directory for models and resources
-    #[arg(short = 'd', long = "download_path", default_value = "resource")]
+    #[arg(short = 'd', long = "download_path", default_value_os_t = default_download_dir())]
     download_path: PathBuf,
 
     /// Device id for CUDA; -1 for CPU
@@ -321,6 +357,7 @@ fn ensure_vad_model(api: &Api, download_path: &PathBuf, use_int8: bool) -> Resul
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let download_path = resolve_download_path(&cli.download_path);
     tracing_subscriber::fmt()
         .with_max_level(LevelFilter::from_level(
             cli.log
@@ -338,8 +375,8 @@ fn main() -> Result<()> {
         endpoint = cli.hf_endpoint,
         "checking/downloading models from HF Hub (mirror-aware)"
     );
-    let snapshot_dir = ensure_models(&api, &cli.download_path)?;
-    let vad_model_path = ensure_vad_model(&api, &cli.download_path, cli.vad_int8)?;
+    let snapshot_dir = ensure_models(&api, &download_path)?;
+    let vad_model_path = ensure_vad_model(&api, &download_path, cli.vad_int8)?;
 
     let encoder_path = snapshot_dir.join("model.int8.onnx");
     let tokens_path = snapshot_dir.join("tokens.txt");
@@ -366,7 +403,7 @@ fn main() -> Result<()> {
                     vad_model = %vad_model_path.display(),
                     "failed to initialize int8 Silero VAD, retrying with float32 model"
                 );
-                let fallback_path = ensure_vad_model(&api, &cli.download_path, false)?;
+                let fallback_path = ensure_vad_model(&api, &download_path, false)?;
                 let fallback_vad =
                     SileroVad::new(&fallback_path, fe_cfg.sample_rate, cli.num_threads)
                         .with_context(|| {
