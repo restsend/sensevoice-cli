@@ -2,13 +2,17 @@
 license = "MIT"
 categories = ["command-line-utilities"]
 name = "sensevoice-cli"
-version = "0.1.3"
+version = "0.1.4"
 authors = ["jinti <shenjindi@fourz.cn>"]
 edition = "2021"
 keywords = ["sensevoice", "developer", "asr", "cli", "onnx"]
 description = "cli tool for speech recognition using sensevoice-small, by restsend.com"
 repository = "https://github.com/restsend/sensevoice-cli"
 
+
+[features]
+opus = ["dep:opus"]
+default = ["opus"]
 
 [dependencies]
 anyhow = "1.0"
@@ -20,7 +24,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Audio decode
-symphonia = { version = "0.5", features = ["mp3", "wav", "ogg", "flac"] }
+symphonia = { version = "0.5", features = [
+    "mp3",
+    "wav",
+    "ogg",
+    "flac",
+    "vorbis",
+] }
+opus = { version = "0.3", optional = true }
 # Math / arrays (keep in sync with ort 2.0.0-rc.10 -> ndarray 0.16)
 ndarray = { version = "0.16.1" }
 realfft = "3.3"

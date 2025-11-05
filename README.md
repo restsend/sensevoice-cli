@@ -9,19 +9,23 @@ A lightweight command-line front end for the SenseVoice multilingual speech reco
 - Cargo package manager
 - pkg-config
 - cmake
+- opus
 
 Linux: 
 ```bash
-apt-get install -y cmake pkg-config
+apt-get install -y cmake pkg-config libopus-dev
 ```
 
 Mac:
 ```bash
-brew install cmake
+brew install cmake opus
 ```
 
 ```
 cargo install sensevoice-cli
+
+# or without opus(.ogg) format
+cargo install sensevoice-cli --no-default-features
 ```
 
 ## Usage
@@ -32,7 +36,7 @@ SenseVoice Rust CLI (ORT + Symphonia + HF Hub)
 Usage: sensevoice-cli [OPTIONS] [AUDIO]
 
 Arguments:
-  [AUDIO]  Input audio file (wav/mp3/ogg/flac)
+  [AUDIO]  Input audio file (wav/mp3/ogg/flac/opus/vorbis)
 
 Options:
       --models-path <MODELS_PATH>  Download/cache directory for models and resources [default: /home/rzl/.sensevoice-models]
