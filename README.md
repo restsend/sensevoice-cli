@@ -3,6 +3,23 @@
 A lightweight command-line front end for the SenseVoice multilingual speech recognition model.
 
 ## Installation
+
+### Prerequisites
+- Rust 1.75 or later
+- Cargo package manager
+- pkg-config
+- cmake
+
+Linux: 
+```bash
+apt-get install -y cmake pkg-config
+```
+
+Mac:
+```bash
+brew install cmake
+```
+
 ```
 cargo install sensevoice-cli
 ```
