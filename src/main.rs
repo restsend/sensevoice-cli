@@ -84,7 +84,7 @@ fn resolve_download_path(path: &Path) -> PathBuf {
 )]
 struct Cli {
     /// Download/cache directory for models and resources
-    #[arg(long = "models_path", default_value_os_t = default_models_dir())]
+    #[arg(long = "models-path", default_value_os_t = default_models_dir())]
     models_path: PathBuf,
 
     /// Device id for CUDA; -1 for CPU
@@ -92,7 +92,7 @@ struct Cli {
     device: i32,
 
     /// Intra-op threads for ONNX Runtime
-    #[arg(short = 't', long = "num_threads", default_value_t = 4)]
+    #[arg(short = 't', long = "threads", default_value_t = 4)]
     num_threads: usize,
 
     /// Language code: auto, zh, en, yue, ja, ko, nospeech
@@ -100,7 +100,7 @@ struct Cli {
     language: String,
 
     /// Use ITN post-processing
-    #[arg(long = "use_itn", action = ArgAction::SetTrue)]
+    #[arg(long = "use-itn", action = ArgAction::SetTrue)]
     use_itn: bool,
 
     /// Use int8 Silero VAD model
@@ -123,9 +123,13 @@ struct Cli {
     #[arg(short = 'c', long = "channels", default_value_t = 1)]
     channels: usize,
 
+    #[arg(long = "download-only", action = ArgAction::SetTrue, default_value_t = false)]
+    /// Download models only and exit
+    download_only: bool,
+
     /// Input audio file (wav/mp3/ogg/flac)
     #[arg(value_name = "AUDIO")]
-    audio: PathBuf,
+    audio: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -360,6 +364,10 @@ fn main() -> Result<()> {
     if !encoder_path.exists() || !tokens_path.exists() {
         error!("model/resource files missing in snapshot. Please check repository contents.");
     }
+    if cli.download_only {
+        debug!("download-only flag set, exiting after model download");
+        return Ok(());
+    }
 
     let fe_cfg = FrontendConfig::default();
     let target_sample_rate = fe_cfg.sample_rate as u32;
@@ -401,11 +409,15 @@ fn main() -> Result<()> {
     let mut encoder = OrtEncoder::new(&encoder_path, cli.device, cli.num_threads)?;
     let decoder = TokenDecoder::new(&tokens_path)?;
     let lang_id = language_id_from_code(&cli.language);
-
+    let audio = match &cli.audio {
+        Some(p) => p,
+        None => {
+            anyhow::bail!("no input audio file specified. Please provide an audio file path.");
+        }
+    };
     // 2) Audio decode (multi-channel)
     let t0 = Instant::now();
-    let (decoded_sample_rate, total_channels, mut samples_per_channel) =
-        decode_audio_multi(&cli.audio)?;
+    let (decoded_sample_rate, total_channels, mut samples_per_channel) = decode_audio_multi(audio)?;
     let requested_channels = if cli.channels == 0 {
         samples_per_channel.len()
     } else {
