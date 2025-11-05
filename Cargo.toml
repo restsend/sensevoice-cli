@@ -2,7 +2,7 @@
 license = "MIT"
 categories = ["command-line-utilities"]
 name = "sensevoice-cli"
-version = "0.1.4"
+version = "0.1.5"
 authors = ["jinti <shenjindi@fourz.cn>"]
 edition = "2021"
 keywords = ["sensevoice", "developer", "asr", "cli", "onnx"]
@@ -37,7 +37,11 @@ ndarray = { version = "0.16.1" }
 realfft = "3.3"
 rustfft = "6.2"
 num-complex = "0.4"
-hf-hub = { version = "0.4.3" }
+hf-hub = { version = "0.4.3", default-features = false, features = [
+    "rustls-tls",
+    "tokio",
+    "ureq",
+] }
 humantime = "2.1"
 once_cell = "1.19"
 # ONNX Runtime via ort crate (pinned prerelease due to registry mirror)
@@ -45,3 +49,7 @@ ort = { version = "2.0.0-rc.10", features = ["ndarray"] }
 ort-sys = { version = "2.0.0-rc.10" }
 knf-rs-sys = "0.3.2"
 ureq = { version = "2" }
+
+
+[profile.release]
+strip = true

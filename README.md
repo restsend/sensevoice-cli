@@ -109,3 +109,8 @@ sensevoice-cli -l zh --use-itn -c 2 samples/demo.wav
 - Multi-channel aware: every audio channel is decoded separately; VAD segments are merged into a single JSON array with channel metadata.
 - VAD precision: append `--vad-int8` to prefer the quantized Silero VAD model when CPU resources are limited.
 - Performance tuning: adjust `-t/--threads` to match available CPU cores; set `--device` to a CUDA ID (`0`, `1`, ...) for GPU inference when ONNX Runtime is built with CUDA.
+
+## Release build
+```bash
+# for linux
+cargo build -r --target
