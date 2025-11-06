@@ -7,6 +7,41 @@ use ort::{
     value::Value,
 };
 
+#[derive(Debug, Clone, Copy)]
+pub struct VadConfig {
+    pub threshold: f32,
+    pub min_silence_ms: f32,
+    pub min_speech_ms: f32,
+    pub speech_pad_ms: f32,
+}
+
+impl VadConfig {
+    pub fn new(
+        threshold: f32,
+        min_silence_ms: f32,
+        min_speech_ms: f32,
+        speech_pad_ms: f32,
+    ) -> Self {
+        Self {
+            threshold,
+            min_silence_ms,
+            min_speech_ms,
+            speech_pad_ms,
+        }
+    }
+}
+
+impl Default for VadConfig {
+    fn default() -> Self {
+        Self {
+            threshold: 0.5,
+            min_silence_ms: 100.0,
+            min_speech_ms: 250.0,
+            speech_pad_ms: 30.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VadSegment {
     pub start: usize,
@@ -22,6 +57,7 @@ pub struct SileroVad {
     min_silence_samples: usize,
     min_speech_samples: usize,
     speech_pad_samples: usize,
+    config: VadConfig,
 }
 
 impl SileroVad {
@@ -29,6 +65,7 @@ impl SileroVad {
         model_path: P,
         sample_rate: usize,
         intra_threads: usize,
+        config: VadConfig,
     ) -> Result<Self> {
         let window_size = match sample_rate {
             8000 => 256,
@@ -59,11 +96,12 @@ impl SileroVad {
         })?;
 
         let state = Array3::<f32>::zeros((2, 1, 128));
-
-        let threshold = 0.5_f32;
-        let min_silence_samples = ((sample_rate as f32) * 0.1).round() as usize; // 100 ms
-        let min_speech_samples = ((sample_rate as f32) * 0.25).round() as usize; // 250 ms
-        let speech_pad_samples = ((sample_rate as f32) * 0.03).round() as usize; // 30 ms
+        let sanitized_config = sanitize_config(config);
+        let threshold = sanitized_config.threshold;
+        let min_silence_samples =
+            ms_to_samples(sanitized_config.min_silence_ms, sample_rate).max(1);
+        let min_speech_samples = ms_to_samples(sanitized_config.min_speech_ms, sample_rate).max(1);
+        let speech_pad_samples = ms_to_samples(sanitized_config.speech_pad_ms, sample_rate);
 
         Ok(Self {
             session,
@@ -74,11 +112,16 @@ impl SileroVad {
             min_silence_samples,
             min_speech_samples,
             speech_pad_samples,
+            config: sanitized_config,
         })
     }
 
     pub fn reset(&mut self) {
         self.state.fill(0.0);
+    }
+
+    pub fn config(&self) -> VadConfig {
+        self.config
     }
 
     pub fn collect_segments(&mut self, pcm: &[f32]) -> Result<Vec<VadSegment>> {
@@ -209,4 +252,37 @@ impl SileroVad {
 
         Ok(probability)
     }
+}
+
+fn sanitize_config(config: VadConfig) -> VadConfig {
+    let defaults = VadConfig::default();
+    VadConfig {
+        threshold: sanitize_threshold(config.threshold, defaults.threshold),
+        min_silence_ms: sanitize_duration(config.min_silence_ms, defaults.min_silence_ms),
+        min_speech_ms: sanitize_duration(config.min_speech_ms, defaults.min_speech_ms),
+        speech_pad_ms: sanitize_duration(config.speech_pad_ms, defaults.speech_pad_ms),
+    }
+}
+
+fn sanitize_threshold(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        fallback
+    }
+}
+
+fn sanitize_duration(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() && value >= 0.0 {
+        value
+    } else {
+        fallback
+    }
+}
+
+fn ms_to_samples(ms: f32, sample_rate: usize) -> usize {
+    if ms <= 0.0 {
+        return 0;
+    }
+    ((sample_rate as f32) * (ms / 1000.0)).round() as usize
 }

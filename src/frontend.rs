@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ndarray::{s, Array1, Array2};
+use ndarray::{s, Array2};
 use std::ffi::c_float;
 
 #[derive(Clone, Copy, Debug)]
@@ -27,14 +27,18 @@ impl Default for FrontendConfig {
 
 pub struct FeaturePipeline {
     cfg: FrontendConfig,
+    scaled_buf: Vec<f32>,
 }
 
 impl FeaturePipeline {
     pub fn new(cfg: FrontendConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            scaled_buf: Vec::new(),
+        }
     }
 
-    pub fn compute_features(&mut self, pcm: &Vec<f32>, sample_rate: u32) -> Result<Array2<f32>> {
+    pub fn compute_features(&mut self, pcm: &[f32], sample_rate: u32) -> Result<Array2<f32>> {
         anyhow::ensure!(
             sample_rate as usize == self.cfg.sample_rate,
             "expect sample rate {} but got {}",
@@ -47,11 +51,17 @@ impl FeaturePipeline {
 
         // Keep config knobs alive for potential future customization of the backend extractor.
         let _ = (self.cfg.frame_length_ms, self.cfg.frame_shift_ms);
-
-        let scaled: Vec<f32> = pcm.iter().map(|x| *x * (1 << 15) as f32).collect();
+        self.scaled_buf.resize(pcm.len(), 0.0);
+        let scale = (1 << 15) as f32;
+        for (dst, src) in self.scaled_buf.iter_mut().zip(pcm.iter()) {
+            *dst = *src * scale;
+        }
 
         let mut result = unsafe {
-            knf_rs_sys::ComputeFbank(scaled.as_ptr() as *const c_float, scaled.len() as i32)
+            knf_rs_sys::ComputeFbank(
+                self.scaled_buf.as_ptr() as *const c_float,
+                self.scaled_buf.len() as i32,
+            )
         };
 
         anyhow::ensure!(
@@ -89,31 +99,33 @@ pub(crate) fn apply_lfr(fbank: &Array2<f32>, lfr_m: usize, lfr_n: usize) -> Arra
         return Array2::<f32>::zeros((0, d * lfr_m));
     }
     let pad = (lfr_m - 1) / 2;
-    let mut padded: Vec<Vec<f32>> = Vec::with_capacity(t + pad);
-    let first = fbank.slice(s![0, ..]).to_owned().to_vec();
-    for _ in 0..pad {
-        padded.push(first.clone());
-    }
-    for row in fbank.rows() {
-        padded.push(row.to_vec());
-    }
     let t_lfr = ((t as f32) / (lfr_n as f32)).ceil() as usize;
     let mut out = Array2::<f32>::zeros((t_lfr, d * lfr_m));
 
     for i in 0..t_lfr {
         let start = i * lfr_n;
-        let mut frame_vec = Vec::with_capacity(d * lfr_m);
         for m in 0..lfr_m {
-            let idx = start + m;
-            if let Some(row) = padded.get(idx) {
-                frame_vec.extend_from_slice(row);
+            let effective_idx = start + m;
+            let row_idx = if effective_idx < pad {
+                0
             } else {
-                let last = padded.last().unwrap();
-                frame_vec.extend_from_slice(last);
-            }
+                let shifted = effective_idx - pad;
+                if shifted < t {
+                    shifted
+                } else {
+                    t - 1
+                }
+            };
+            let src_row = fbank.row(row_idx);
+            let src_slice = src_row
+                .as_slice()
+                .expect("mel features row should be contiguous");
+            let mut row_out = out.slice_mut(s![i, m * d..(m + 1) * d]);
+            let dst_slice = row_out
+                .as_slice_mut()
+                .expect("output row should be contiguous");
+            dst_slice.copy_from_slice(src_slice);
         }
-        let row = Array1::from_vec(frame_vec);
-        out.slice_mut(s![i, ..]).assign(&row.view());
     }
 
     out

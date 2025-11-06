@@ -39,12 +39,20 @@ Arguments:
   [AUDIO]  Input audio file (wav/mp3/ogg/flac/opus/vorbis)
 
 Options:
-      --models-path <MODELS_PATH>  Download/cache directory for models and resources [default: /home/rzl/.sensevoice-models]
-      --device <DEVICE>            Device id for CUDA; -1 for CPU [default: -1]
-  -t, --threads <NUM_THREADS>      Intra-op threads for ONNX Runtime [default: 4]
+    --models-path <MODELS_PATH>  Download/cache directory for models and resources [default: ~/.sensevoice-models]
+  -t, --threads <NUM_THREADS>      Intra-op threads for ONNX Runtime [default: 1]
   -l, --language <LANGUAGE>        Language code: auto, zh, en, yue, ja, ko, nospeech [default: auto]
       --use-itn                    Use ITN post-processing
       --vad-int8                   Use int8 Silero VAD model
+    --no-vad                     Disable Silero VAD segmentation
+    --vad-threshold <VAD_THRESHOLD>
+                   VAD probability threshold (0.0-1.0) [default: 0.5]
+    --vad-min-speech-ms <VAD_MIN_SPEECH_MS>
+                   Minimum speech duration in milliseconds [default: 250]
+    --vad-min-silence-ms <VAD_MIN_SILENCE_MS>
+                   Minimum silence duration in milliseconds [default: 100]
+    --vad-speech-pad-ms <VAD_SPEECH_PAD_MS>
+                   Additional padding in milliseconds around segments [default: 30]
       --hf-endpoint <HF_ENDPOINT>  Optional HF endpoint/mirror (overrides env HF_ENDPOINT/HF_MIRROR)
       --log <LOG>                  Log level
   -o, --output <OUTPUT>            Output JSON file path
@@ -102,15 +110,13 @@ sensevoice-cli -l zh --use-itn -c 2 samples/demo.wav
 - `-o/--output`: write JSON to a file instead of stdout.
 - `--log`: set log verbosity (e.g. `info`, `debug`).
 - `--download-only`: prefetch model assets without running inference.
+- `--no-vad`: bypass voice activity detection and transcribe each channel as a whole.
+- `--vad-*`: tune Silero VAD behaviour (threshold, speech/silence durations, padding) without editing code.
 
 ## Advanced tips
 
 - Mirror-friendly downloads: add `--hf-endpoint https://hf-mirror.com` (or set `HF_ENDPOINT/HF_MIRROR`) to speed up model fetches from mainland China.
 - Multi-channel aware: every audio channel is decoded separately; VAD segments are merged into a single JSON array with channel metadata.
 - VAD precision: append `--vad-int8` to prefer the quantized Silero VAD model when CPU resources are limited.
-- Performance tuning: adjust `-t/--threads` to match available CPU cores; set `--device` to a CUDA ID (`0`, `1`, ...) for GPU inference when ONNX Runtime is built with CUDA.
-
-## Release build
-```bash
-# for linux
-cargo build -r --target
+- VAD controls: fine-tune segmentation with `--vad-threshold`, `--vad-min-speech-ms`, `--vad-min-silence-ms`, and `--vad-speech-pad-ms`.
+- Performance tuning: adjust `-t/--threads` to match available CPU cores. GPU execution currently requires rebuilding with CUDA-enabled ONNX Runtime.

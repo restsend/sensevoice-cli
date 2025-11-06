@@ -9,23 +9,19 @@ use ort::{
 
 use crate::tokenizer::TokenDecoder;
 
-pub struct OrtEncoder {
+pub struct SensevoiceEncoder {
     session: Session,
     input_names: Vec<String>,
 }
 
-impl OrtEncoder {
-    pub fn new<P: AsRef<Path>>(model_path: P, device: i32, intra_threads: usize) -> Result<Self> {
+impl SensevoiceEncoder {
+    pub fn new<P: AsRef<Path>>(model_path: P, intra_threads: usize) -> Result<Self> {
         let builder = Session::builder()
             .map_err(|e| anyhow!("ORT session builder error: {e}"))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| anyhow!("ORT optimization level error: {e}"))?
             .with_intra_threads(intra_threads)
             .map_err(|e| anyhow!("ORT intra threads error: {e}"))?;
-
-        if device >= 0 {
-            tracing::warn!("CUDA execution provider not configured; falling back to CPU");
-        }
 
         let model_bytes = std::fs::read(model_path.as_ref())
             .with_context(|| format!("read encoder model {}", model_path.as_ref().display()))?;
