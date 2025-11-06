@@ -13,6 +13,7 @@ pub struct VadConfig {
     pub min_silence_ms: f32,
     pub min_speech_ms: f32,
     pub speech_pad_ms: f32,
+    pub merge_gap_ms: f32,
 }
 
 impl VadConfig {
@@ -21,12 +22,14 @@ impl VadConfig {
         min_silence_ms: f32,
         min_speech_ms: f32,
         speech_pad_ms: f32,
+        merge_gap_ms: f32,
     ) -> Self {
         Self {
             threshold,
             min_silence_ms,
             min_speech_ms,
             speech_pad_ms,
+            merge_gap_ms,
         }
     }
 }
@@ -35,9 +38,10 @@ impl Default for VadConfig {
     fn default() -> Self {
         Self {
             threshold: 0.5,
-            min_silence_ms: 100.0,
-            min_speech_ms: 250.0,
-            speech_pad_ms: 30.0,
+            min_silence_ms: 200.0,
+            min_speech_ms: 400.0,
+            speech_pad_ms: 120.0,
+            merge_gap_ms: 200.0,
         }
     }
 }
@@ -57,6 +61,7 @@ pub struct SileroVad {
     min_silence_samples: usize,
     min_speech_samples: usize,
     speech_pad_samples: usize,
+    merge_gap_samples: usize,
     config: VadConfig,
 }
 
@@ -102,6 +107,7 @@ impl SileroVad {
             ms_to_samples(sanitized_config.min_silence_ms, sample_rate).max(1);
         let min_speech_samples = ms_to_samples(sanitized_config.min_speech_ms, sample_rate).max(1);
         let speech_pad_samples = ms_to_samples(sanitized_config.speech_pad_ms, sample_rate);
+        let merge_gap_samples = ms_to_samples(sanitized_config.merge_gap_ms, sample_rate);
 
         Ok(Self {
             session,
@@ -112,6 +118,7 @@ impl SileroVad {
             min_silence_samples,
             min_speech_samples,
             speech_pad_samples,
+            merge_gap_samples,
             config: sanitized_config,
         })
     }
@@ -194,6 +201,13 @@ impl SileroVad {
                         }
                         continue;
                     }
+                    let gap = seg.start.saturating_sub(last.end);
+                    if gap <= self.merge_gap_samples {
+                        if seg.end > last.end {
+                            last.end = seg.end;
+                        }
+                        continue;
+                    }
                 }
                 merged.push(seg);
             }
@@ -261,6 +275,7 @@ fn sanitize_config(config: VadConfig) -> VadConfig {
         min_silence_ms: sanitize_duration(config.min_silence_ms, defaults.min_silence_ms),
         min_speech_ms: sanitize_duration(config.min_speech_ms, defaults.min_speech_ms),
         speech_pad_ms: sanitize_duration(config.speech_pad_ms, defaults.speech_pad_ms),
+        merge_gap_ms: sanitize_duration(config.merge_gap_ms, defaults.merge_gap_ms),
     }
 }
 

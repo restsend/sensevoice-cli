@@ -112,16 +112,20 @@ struct Cli {
     vad_threshold: f32,
 
     /// Minimum speech duration in milliseconds for a valid segment
-    #[arg(long = "vad-min-speech-ms", default_value_t = 250.0)]
+    #[arg(long = "vad-min-speech-ms", default_value_t = 400.0)]
     vad_min_speech_ms: f32,
 
     /// Minimum silence duration in milliseconds before closing a segment
-    #[arg(long = "vad-min-silence-ms", default_value_t = 100.0)]
+    #[arg(long = "vad-min-silence-ms", default_value_t = 200.0)]
     vad_min_silence_ms: f32,
 
     /// Extra padding in milliseconds added to segment boundaries
-    #[arg(long = "vad-speech-pad-ms", default_value_t = 30.0)]
+    #[arg(long = "vad-speech-pad-ms", default_value_t = 120.0)]
     vad_speech_pad_ms: f32,
+
+    /// Merge adjacent VAD segments separated by short gaps (milliseconds)
+    #[arg(long = "vad-merge-gap-ms", default_value_t = 1200.0)]
+    vad_merge_gap_ms: f32,
 
     /// Optional HF endpoint/mirror (overrides env HF_ENDPOINT/HF_MIRROR)
     #[arg(long = "hf-endpoint")]
@@ -393,6 +397,7 @@ fn main() -> Result<()> {
         cli.vad_min_silence_ms,
         cli.vad_min_speech_ms,
         cli.vad_speech_pad_ms,
+        cli.vad_merge_gap_ms,
     );
     let mut vad = if let Some(vad_model_path) = vad_model_path {
         match SileroVad::new(
