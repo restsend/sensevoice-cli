@@ -121,3 +121,4 @@ sensevoice-cli -l zh --use-itn -c 2 samples/demo.wav
 - VAD precision: append `--vad-int8` to prefer the quantized Silero VAD model when CPU resources are limited.
 - VAD controls: fine-tune segmentation with the `--vad-*` flags (threshold, speech/silence durations, padding, merge gap).
 - Performance tuning: adjust `-t/--threads` to match available CPU cores. GPU execution currently requires rebuilding with CUDA-enabled ONNX Runtime.
+- Session warm-up: the first run saves optimized `.ort` graphs next to the downloaded models; later runs reuse them to avoid ONNX Runtime re-optimization costs.

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{fs, path::Path};
 
 use anyhow::{anyhow, ensure, Context, Result};
 use ndarray::{Array1, Array3, Axis};
@@ -6,6 +6,7 @@ use ort::{
     session::{builder::GraphOptimizationLevel, Session},
     value::{DynValue, Tensor},
 };
+use tracing::warn;
 
 use crate::tokenizer::TokenDecoder;
 
@@ -16,18 +17,7 @@ pub struct SensevoiceEncoder {
 
 impl SensevoiceEncoder {
     pub fn new<P: AsRef<Path>>(model_path: P, intra_threads: usize) -> Result<Self> {
-        let builder = Session::builder()
-            .map_err(|e| anyhow!("ORT session builder error: {e}"))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| anyhow!("ORT optimization level error: {e}"))?
-            .with_intra_threads(intra_threads)
-            .map_err(|e| anyhow!("ORT intra threads error: {e}"))?;
-
-        let model_bytes = std::fs::read(model_path.as_ref())
-            .with_context(|| format!("read encoder model {}", model_path.as_ref().display()))?;
-        let session = builder
-            .commit_from_memory(&model_bytes)
-            .map_err(|e| anyhow!("ORT load model error: {e}"))?;
+        let session = build_session_with_ort_cache(model_path.as_ref(), intra_threads)?;
         let input_names = session
             .inputs
             .iter()
@@ -107,6 +97,66 @@ impl SensevoiceEncoder {
         let ids = argmax_and_unique(logits.index_axis(Axis(0), 0));
         Ok(decoder.decode_ids(&ids))
     }
+}
+
+fn build_session_with_ort_cache(model_path: &Path, intra_threads: usize) -> Result<Session> {
+    let ort_path = model_path.with_extension("ort");
+
+    if ort_path.exists() {
+        let session_attempt = Session::builder()
+            .map_err(|e| anyhow!("ORT session builder error: {e}"))?
+            .with_intra_threads(intra_threads)
+            .map_err(|e| anyhow!("ORT intra threads error: {e}"))?
+            .commit_from_file(&ort_path);
+
+        match session_attempt {
+            Ok(session) => return Ok(session),
+            Err(err) => {
+                warn!(
+                    ort = %ort_path.display(),
+                    model = %model_path.display(),
+                    error = %err,
+                    "failed to load cached ORT graph, regenerating"
+                );
+                let _ = fs::remove_file(&ort_path);
+            }
+        }
+    }
+
+    let builder = Session::builder()
+        .map_err(|e| anyhow!("ORT session builder error: {e}"))?
+        .with_optimization_level(GraphOptimizationLevel::Level2)
+        .map_err(|e| anyhow!("ORT optimization level error: {e}"))?
+        .with_intra_threads(intra_threads)
+        .map_err(|e| anyhow!("ORT intra threads error: {e}"))?;
+
+    if let Ok(builder_with_cache) = builder.with_optimized_model_path(&ort_path) {
+        match builder_with_cache.commit_from_file(model_path) {
+            Ok(session) => return Ok(session),
+            Err(err) => {
+                warn!(
+                    ort = %ort_path.display(),
+                    model = %model_path.display(),
+                    error = %err,
+                    "failed to build session with ORT cache, retrying without cache"
+                );
+                let _ = fs::remove_file(&ort_path);
+            }
+        }
+    }
+
+    let fallback_builder = Session::builder()
+        .map_err(|e| anyhow!("ORT session builder error: {e}"))?
+        .with_optimization_level(GraphOptimizationLevel::Level2)
+        .map_err(|e| anyhow!("ORT optimization level error: {e}"))?
+        .with_intra_threads(intra_threads)
+        .map_err(|e| anyhow!("ORT intra threads error: {e}"))?;
+
+    let model_bytes = fs::read(model_path)
+        .with_context(|| format!("read encoder model {}", model_path.display()))?;
+    fallback_builder
+        .commit_from_memory(&model_bytes)
+        .map_err(|e| anyhow!("ORT load model error: {e}"))
 }
 
 fn argmax_and_unique(logits: ndarray::ArrayView2<'_, f32>) -> Vec<i32> {
