@@ -13,12 +13,12 @@ A lightweight command-line front end for the SenseVoice multilingual speech reco
 
 Linux: 
 ```bash
-apt-get install -y cmake pkg-config libopus-dev
+apt-get install -y cmake pkg-config
 ```
 
 Mac:
 ```bash
-brew install cmake opus
+brew install cmake
 ```
 
 ```

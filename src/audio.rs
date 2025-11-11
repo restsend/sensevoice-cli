@@ -1,5 +1,8 @@
 use anyhow::{ensure, Context, Result};
 use std::path::Path;
+
+#[cfg(feature = "opus")]
+use opusic_sys as opus_sys;
 use symphonia::core::audio::Signal;
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL, CODEC_TYPE_OPUS};
 use symphonia::core::errors::Error as SymphErr;
@@ -114,21 +117,56 @@ fn decode_opus_track(
     sample_rate: u32,
     channels: usize,
 ) -> Result<(u32, usize, Vec<Vec<f32>>)> {
-    use opus::{Channels as OpusChannels, Decoder as OpusDecoder};
-    /// Maximum number of samples per Opus frame at 48 kHz (120 ms).
-    const OPUS_MAX_FRAME_SAMPLES: usize = 5760;
+    use std::ffi::CStr;
 
-    let opus_channels = match channels {
-        1 => OpusChannels::Mono,
-        2 => OpusChannels::Stereo,
-        _ => anyhow::bail!("Opus decoder currently supports only mono or stereo (got {channels})"),
-    };
+    const MAX_PACKET_DURATION_MS: usize = 120;
 
-    let mut decoder = OpusDecoder::new(sample_rate, opus_channels)
-        .map_err(|e| anyhow::anyhow!("create Opus decoder: {e}"))?;
+    fn opus_error_message(code: i32) -> String {
+        unsafe {
+            let ptr = opus_sys::opus_strerror(code);
+            if ptr.is_null() {
+                return format!("code {code}");
+            }
+            CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        }
+    }
 
+    struct DecoderGuard(*mut opus_sys::OpusDecoder);
+
+    impl Drop for DecoderGuard {
+        fn drop(&mut self) {
+            unsafe {
+                opus_sys::opus_decoder_destroy(self.0);
+            }
+        }
+    }
+
+    ensure!(channels > 0, "Opus decoder requires at least one channel");
+    ensure!(
+        channels <= 2,
+        "Opus decoder currently supports only mono or stereo (got {channels})"
+    );
+    ensure!(
+        sample_rate <= i32::MAX as u32,
+        "Sample rate {sample_rate} exceeds Opus API range"
+    );
+
+    let sample_rate_i32 = sample_rate as i32;
+    let channel_i32 = channels as i32;
+
+    let mut err: i32 = opus_sys::OPUS_OK;
+    let decoder_ptr =
+        unsafe { opus_sys::opus_decoder_create(sample_rate_i32, channel_i32, &mut err) };
+    if decoder_ptr.is_null() || err != opus_sys::OPUS_OK {
+        let message = opus_error_message(err);
+        anyhow::bail!("create Opus decoder: {message}");
+    }
+
+    let decoder = DecoderGuard(decoder_ptr);
+
+    let max_frame_samples = ((sample_rate as usize * MAX_PACKET_DURATION_MS) + 999) / 1000;
     let mut per_channel: Vec<Vec<f32>> = vec![Vec::new(); channels];
-    let mut decode_buf = vec![0.0_f32; OPUS_MAX_FRAME_SAMPLES * channels.max(1)];
+    let mut decode_buf = vec![0.0_f32; max_frame_samples.max(1) * channels.max(1)];
 
     // Skip encoder priming samples if present.
     let mut skip_samples = track.codec_params.delay.unwrap_or(0) as usize;
@@ -148,17 +186,39 @@ fn decode_opus_track(
             continue;
         }
 
-        let required_frames = decoder
-            .get_nb_samples(data)
-            .unwrap_or(OPUS_MAX_FRAME_SAMPLES);
+        let required_frames = unsafe {
+            let frames = opus_sys::opus_packet_get_nb_samples(
+                data.as_ptr(),
+                data.len() as i32,
+                sample_rate_i32,
+            );
+            if frames <= 0 {
+                max_frame_samples as i32
+            } else {
+                frames
+            }
+        } as usize;
+
         if required_frames * channels > decode_buf.len() {
             decode_buf.resize(required_frames * channels, 0.0);
         }
 
-        let frames = decoder
-            .decode_float(data, &mut decode_buf, false)
-            .map_err(|e| anyhow::anyhow!("decode Opus packet: {e}"))?;
+        let frames = unsafe {
+            opus_sys::opus_decode_float(
+                decoder.0,
+                data.as_ptr(),
+                data.len() as i32,
+                decode_buf.as_mut_ptr(),
+                required_frames as i32,
+                0,
+            )
+        };
 
+        if frames < 0 {
+            anyhow::bail!("decode Opus packet: {}", opus_error_message(frames));
+        }
+
+        let frames = frames as usize;
         if frames == 0 {
             continue;
         }
@@ -176,11 +236,6 @@ fn decode_opus_track(
             if start >= end {
                 continue;
             }
-        }
-
-        let available_frames = end - start;
-        if available_frames == 0 {
-            continue;
         }
 
         for frame_idx in start..end {

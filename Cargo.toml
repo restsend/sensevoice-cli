@@ -2,7 +2,7 @@
 license = "MIT"
 categories = ["command-line-utilities"]
 name = "sensevoice-cli"
-version = "0.1.8"
+version = "0.1.9"
 authors = ["jinti <shenjindi@fourz.cn>"]
 edition = "2021"
 keywords = ["sensevoice", "developer", "asr", "cli", "onnx"]
@@ -11,7 +11,7 @@ repository = "https://github.com/restsend/sensevoice-cli"
 
 
 [features]
-opus = ["dep:opus"]
+opus = ["dep:opusic-sys"]
 default = ["opus"]
 
 [dependencies]
@@ -31,7 +31,7 @@ symphonia = { version = "0.5", features = [
     "flac",
     "vorbis",
 ] }
-opus = { version = "0.3", optional = true }
+opusic-sys = { version = "0.5.8", optional = true }
 # Math / arrays (keep in sync with ort 2.0.0-rc.10 -> ndarray 0.16)
 ndarray = { version = "0.16.1" }
 realfft = "3.3"
